@@ -1,179 +1,207 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-aljam3.py — عميل للتعامل مع واجهة "الجامع" البرمجية الرسمية (REST API v1)
-=========================================================================
+aljam3.py — عميل للتعامل مع "الجامع" (aljam3.com)
+=================================================
 
-الجامع (aljam3.com): مكتبة المكتبات الإسلامية (أكثر من 63,500 كتاب).
-الواجهة رسمية وموثّقة (Swagger) ولا تحتاج مفتاحًا.
+الجامع: مكتبة المكتبات الإسلامية (أكثر من 63,500 كتاب). مفتوح ولا يحتاج مفتاحًا.
 
-القاعدة:   https://aljam3.com/api/v1
-أهم المسارات المستخدمة في برنامج التخريج:
-    GET /search?q=...                      → بحث في نصوص كل الكتب
-    GET /books/{id}                        → معلومات كتاب (اسم، مؤلف، قسم، مكتبة)
-    GET /books/{id}?expand[]=files         → + ملفات الكتاب (المجلدات)
-    GET /authors/{id}                      → معلومات مؤلف
+يستخدم هذا العميل خادم MCP العام للجامع لأنه يُرجع في نتيجة البحث الواحدة:
+المقتطف + اسم الكتاب + اسم المؤلف + القسم + المكتبة + رقم الصفحة + روابط
+صفحة الجامع وملف الـ PDF — أي كل ما يلزم للتخريج دفعة واحدة.
+
+    نقطة الاتصال:  https://aljam3.com/mcp   (Streamable HTTP، بلا مصادقة)
+    البروتوكول:    JSON-RPC 2.0  (tools/call)
+    الأدوات:       search, get_page, list_categories, ... (سبع أدوات)
 
 ملاحظات توثيقية (ذكرها الموقع نفسه):
   - رقم الصفحة يخصّ الملف الرقمي وقد يختلف عن ترقيم المطبوع.
-  - الجامع لا يوفّر الناشر/الطبعة/درجة الحديث؛ لا نُلفّقها.
+  - الجامع لا يوفّر الناشر/الطبعة/درجة الحديث؛ لا تُلفّق هذه البيانات.
+  - قد يحتوي النص أخطاء استخراج/OCR؛ راجع رابط الـ PDF عند التوثيق المهم.
 """
 
 from __future__ import annotations
 
 import html as html_lib
+import itertools
+import json
 import re
-from dataclasses import dataclass, field
-from functools import lru_cache
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import requests
 
-API_BASE = "https://aljam3.com/api/v1"
+MCP_URL = "https://aljam3.com/mcp"
 SITE_BASE = "https://aljam3.com"
 
 _HEADERS = {
-    "Accept": "application/json",
+    # خادم MCP يتطلب هذين النوعين في Accept
+    "Accept": "application/json, text/event-stream",
+    "Content-Type": "application/json",
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
     ),
 }
 
+_id_counter = itertools.count(1)
+
 
 # ---------------------------------------------------------------------------
 # بنى البيانات
 # ---------------------------------------------------------------------------
 @dataclass
-class BookInfo:
-    id: int
-    title: str = ""
+class SearchHit:
+    """نتيجة بحث: مقتطف مطابق مع بيانات كتابه الكاملة للتخريج."""
+    excerpt: str = ""            # المقتطف
+    book_name: str = ""
     author_name: str = ""
     category_name: str = ""
     library_name: str = ""
-    volumes: Optional[int] = None
-
-
-@dataclass
-class SearchHit:
-    """نتيجة بحث: صفحة مطابقة مع نصّها ورقمها وبيانات كتابها."""
-    page_id: int
-    file_id: int
-    page_number: int
-    content: str                 # نص الصفحة (قد يحوي وسوم <mark> للتظليل)
-    book: Optional[BookInfo] = None
+    page_number: Optional[int] = None
+    file_id: Optional[int] = None
+    book_id: Optional[int] = None
+    url: str = ""               # رابط صفحة الجامع
+    pdf_url: str = ""           # رابط صفحة الـ PDF
 
     @property
     def site_url(self) -> str:
-        """رابط صفحة الجامع لهذه النتيجة (للمراجعة والتوثيق)."""
-        return f"{SITE_BASE}/books/{self.book.id}" if self.book else SITE_BASE
+        return self.url or (f"{SITE_BASE}/books/{self.book_id}" if self.book_id else SITE_BASE)
 
 
 # ---------------------------------------------------------------------------
-# طبقة الشبكة
+# طبقة MCP (JSON-RPC)
 # ---------------------------------------------------------------------------
-def _get(path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    url = f"{API_BASE}{path}"
-    resp = requests.get(url, params=params or {}, headers=_HEADERS, timeout=30)
-    resp.raise_for_status()
+def _parse_mcp_body(resp: requests.Response) -> dict[str, Any]:
+    """
+    يحلّل رد خادم MCP سواء كان JSON صِرفًا أو تدفّق أحداث (SSE: أسطر data:).
+    """
+    ctype = resp.headers.get("Content-Type", "")
+    text = resp.text
+    if "text/event-stream" in ctype:
+        # اجمع أسطر data: وادمج أول JSON صالح
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                payload = line[len("data:"):].strip()
+                if payload:
+                    try:
+                        return json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+        raise ValueError("لم يُعثر على بيانات JSON في تدفّق الأحداث.")
     return resp.json()
+
+
+def _mcp_call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """ينفّذ أداة MCP ويُعيد الكائن structuredContent (أو محتوى النص)."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": next(_id_counter),
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    }
+    resp = requests.post(MCP_URL, headers=_HEADERS, json=body, timeout=30)
+    resp.raise_for_status()
+    data = _parse_mcp_body(resp)
+
+    if "error" in data and data["error"]:
+        err = data["error"]
+        raise RuntimeError(f"خطأ من الجامع: {err.get('message', err)}")
+
+    result = data.get("result", {}) or {}
+    structured = result.get("structuredContent")
+    if structured is not None:
+        return structured
+
+    # احتياط: بعض الردود تضع النتيجة كنص JSON داخل content
+    for block in result.get("content", []) or []:
+        if block.get("type") == "text":
+            try:
+                return json.loads(block.get("text", "{}"))
+            except json.JSONDecodeError:
+                pass
+    return result
 
 
 # ---------------------------------------------------------------------------
 # دوال الواجهة
 # ---------------------------------------------------------------------------
-@lru_cache(maxsize=512)
-def get_book_info(book_id: int) -> BookInfo:
-    """يجلب بيانات كتاب (مع التخزين المؤقت لتفادي الطلبات المكررة)."""
-    data = _get(f"/books/{book_id}")
-    author = data.get("author") or {}
-    category = data.get("category") or {}
-    library = data.get("library") or {}
-    return BookInfo(
-        id=data.get("id", book_id),
-        title=clean_text(data.get("title", "")),
-        author_name=clean_text(author.get("name", "")),
-        category_name=clean_text(category.get("name", "")),
-        library_name=clean_text(library.get("name", "")),
-        volumes=data.get("volumes") if data.get("volumes", -1) not in (-1, 0) else None,
-    )
-
-
-def _book_id_from_file(file_id: int) -> Optional[int]:
-    """يحاول معرفة رقم الكتاب من رقم الملف عبر مسار /files/{id}."""
-    try:
-        data = _get(f"/files/{file_id}")
-        # الملف قد يحمل رابط الكتاب؛ نحاول استخراج المعرّف من الرابط
-        link = data.get("book_link") or ""
-        m = re.search(r"/books/(\d+)", link)
-        if m:
-            return int(m.group(1))
-    except requests.RequestException:
-        pass
-    return None
+def _first(d: dict, *keys, default=""):
+    """يُعيد أول قيمة غير فارغة من بين المفاتيح المحتملة."""
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, ""):
+            return v
+    return default
 
 
 def search(
     query: str,
     *,
-    library: Optional[int] = None,
-    books: Optional[list[int]] = None,
-    authors: Optional[list[int]] = None,
-    categories: Optional[list[int]] = None,
-    limit: int = 20,
+    book_id: Optional[int] = None,
+    author_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+    library_id: Optional[int] = None,
+    per_page: int = 20,
     page: int = 1,
-    enrich: bool = True,
 ) -> tuple[dict[str, Any], list[SearchHit]]:
     """
-    يبحث عن عبارة في نصوص كل كتب الجامع.
-
-    enrich=True: يجلب اسم الكتاب والمؤلف لكل نتيجة (طلبات إضافية، لكن مُخزّنة مؤقتًا).
-    يُرجع (معلومات الترقيم, قائمة النتائج).
+    يبحث في نصوص كتب الجامع عبر أداة MCP «search».
+    يُرجع (معلومات الترقيم, قائمة النتائج) — كل نتيجة تحوي بيانات كتابها كاملة.
     """
-    params: dict[str, Any] = {"q": query, "limit": limit, "page": page}
-    if library is not None:
-        params["library"] = library
-    if books:
-        params["books[]"] = books
-    if authors:
-        params["authors[]"] = authors
-    if categories:
-        params["categories[]"] = categories
+    args: dict[str, Any] = {"q": query, "per_page": per_page, "page": page}
+    if book_id is not None:
+        args["book_id"] = book_id
+    if author_id is not None:
+        args["author_id"] = author_id
+    if category_id is not None:
+        args["category_id"] = category_id
+    if library_id is not None:
+        args["library_id"] = library_id
 
-    data = _get("/search", params)
+    data = _mcp_call("search", args)
     pagination = data.get("pagination", {}) or {}
     hits: list[SearchHit] = []
 
-    for row in data.get("pages", []) or []:
-        hit = SearchHit(
-            page_id=row.get("id", 0),
-            file_id=row.get("file_id", 0),
-            page_number=row.get("number", 0),
-            content=row.get("content", "") or "",
+    for r in data.get("results", []) or []:
+        hits.append(
+            SearchHit(
+                excerpt=_first(r, "excerpt", "snip", "text", "content"),
+                book_name=_first(r, "book_name", "book", "book_title"),
+                author_name=_first(r, "author_name", "author"),
+                category_name=_first(r, "category_name", "subject", "category"),
+                library_name=_first(r, "library_name", "library"),
+                page_number=_first(r, "page_number", "number", "page", default=None),
+                file_id=_first(r, "file_id", default=None),
+                book_id=_first(r, "book_id", default=None),
+                url=_first(r, "url", "aljam3_url", "link"),
+                pdf_url=_first(r, "pdf_url", "pdf_link", "pdf"),
+            )
         )
-        hits.append(hit)
-
-    if enrich:
-        for hit in hits:
-            bid = _book_id_from_file(hit.file_id)
-            if bid:
-                try:
-                    hit.book = get_book_info(bid)
-                except requests.RequestException:
-                    hit.book = None
-
     return pagination, hits
 
 
-def list_categories() -> list[dict[str, Any]]:
-    """يجلب قائمة الأقسام (للفلترة في الواجهة)."""
-    data = _get("/categories")
+def get_page(file_id: int, page_number: int, max_chars: int = 12000) -> dict[str, Any]:
+    """يقرأ نص صفحة بعينها كاملًا عبر أداة MCP «get_page»."""
+    return _mcp_call(
+        "get_page",
+        {"file_id": file_id, "page_number": page_number, "max_chars": max_chars},
+    )
+
+
+def list_categories(query: str = "", per_page: int = 20) -> list[dict[str, Any]]:
+    """يجلب/يبحث الأقسام عبر أداة MCP «list_categories»."""
+    args: dict[str, Any] = {"per_page": per_page}
+    if query:
+        args["q"] = query
+    data = _mcp_call("list_categories", args)
     return data.get("categories", []) or []
 
 
-def list_libraries() -> list[dict[str, Any]]:
-    """يجلب قائمة المكتبات المصدرية."""
-    data = _get("/libraries")
+def list_libraries(per_page: int = 20) -> list[dict[str, Any]]:
+    """يجلب المكتبات المصدرية عبر أداة MCP «list_libraries»."""
+    data = _mcp_call("list_libraries", {"per_page": per_page})
     return data.get("libraries", []) or []
 
 
@@ -188,7 +216,7 @@ def clean_text(raw: str) -> str:
     """يزيل الوسوم (بما فيها <mark>) ويفكّ الكيانات ويضبط الفراغات."""
     if not raw:
         return ""
-    txt = _TAG_RE.sub("", raw)
+    txt = _TAG_RE.sub("", str(raw))
     txt = html_lib.unescape(txt)
     txt = _WS_RE.sub(" ", txt)
     return txt.strip()
@@ -196,18 +224,18 @@ def clean_text(raw: str) -> str:
 
 def format_citation(hit: SearchHit, *, with_author: bool = True) -> str:
     """
-    يبني نص التخريج من نتيجة بحث:
-        اسم الكتاب، لـفلان (ص رقم)
+    يبني نص التخريج:
+        اسم الكتاب، لـفلان، ص رقم
     """
-    if not hit.book:
-        return f"الجامع — ص {hit.page_number}"
-    name = hit.book.title or "كتاب غير معروف"
+    name = clean_text(hit.book_name) or "كتاب غير معروف"
     parts: list[str] = []
-    if with_author and hit.book.author_name:
-        parts.append(f"{name}، لـ{hit.book.author_name}")
+    author = clean_text(hit.author_name)
+    if with_author and author:
+        parts.append(f"{name}، لـ{author}")
     else:
         parts.append(name)
-    parts.append(f"ص {hit.page_number}")
+    if hit.page_number is not None:
+        parts.append(f"ص {hit.page_number}")
     return "، ".join(parts)
 
 
@@ -217,14 +245,15 @@ def format_citation(hit: SearchHit, *, with_author: bool = True) -> str:
 def _demo(query: str, limit: int = 5) -> None:
     print(f"🔎 البحث في الجامع عن: «{query}»\n" + "=" * 60)
     try:
-        pagination, hits = search(query, limit=limit)
-    except requests.RequestException as e:
+        pagination, hits = search(query, per_page=limit)
+    except Exception as e:  # noqa: BLE001
         print(f"❌ تعذّر الاتصال بالجامع: {e}")
         return
-    print(f"إجمالي النتائج: {pagination.get('count', '?')}\n")
+    print(f"إجمالي النتائج: {pagination.get('count', pagination.get('total', '?'))}\n")
     for i, hit in enumerate(hits, 1):
         print(f"[{i}] {format_citation(hit)}")
-        print(f"    {clean_text(hit.content)[:150]}…")
+        print(f"    {clean_text(hit.excerpt)[:150]}…")
+        print(f"    المصدر: {hit.site_url}")
         print("-" * 60)
 
 

@@ -168,7 +168,10 @@ class TakhrijApp(tk.Tk):
             return
         self.categories = {0: "— كل الأقسام —"}
         for c in cats:
-            self.categories[c.get("id")] = aljam3.clean_text(c.get("name", ""))
+            cid = c.get("id")
+            name = aljam3.clean_text(c.get("name", "") or c.get("title", ""))
+            if cid is not None and name:
+                self.categories[cid] = name
         self.after(0, lambda: self.cat_cb.configure(values=list(self.categories.values())))
 
     # ----------------------------------------------------------------- البحث
@@ -179,19 +182,19 @@ class TakhrijApp(tk.Tk):
             return
         cat_id = next((k for k, v in self.categories.items() if v == self.cat_var.get()), 0)
         book = self.book_var.get().strip()
-        books = [int(book)] if book.isdigit() else None
-        cats = [cat_id] if cat_id else None
+        book_id = int(book) if book.isdigit() else None
+        category_id = cat_id or None
         limit = self.limit_var.get()
 
         self._set_status("جارٍ البحث في الجامع…")
         threading.Thread(
-            target=self._search_worker, args=(q, books, cats, limit), daemon=True
+            target=self._search_worker, args=(q, book_id, category_id, limit), daemon=True
         ).start()
 
-    def _search_worker(self, q, books, cats, limit) -> None:
+    def _search_worker(self, q, book_id, category_id, limit) -> None:
         try:
             pagination, hits = aljam3.search(
-                q, books=books, categories=cats, limit=limit, enrich=True
+                q, book_id=book_id, category_id=category_id, per_page=limit
             )
         except Exception as e:  # noqa: BLE001
             self.after(0, lambda: self._search_err(e))
@@ -212,20 +215,19 @@ class TakhrijApp(tk.Tk):
         self.checked.clear()
         self.tree.delete(*self.tree.get_children())
         for i, hit in enumerate(hits):
-            snip = aljam3.clean_text(hit.content)
+            snip = aljam3.clean_text(hit.excerpt)
             self.tree.insert(
                 "", "end", iid=str(i),
                 values=(
                     "☐",
                     snip[:130] + ("…" if len(snip) > 130 else ""),
-                    hit.book.title if hit.book else "—",
-                    hit.book.author_name if hit.book else "—",
-                    hit.page_number,
+                    aljam3.clean_text(hit.book_name) or "—",
+                    aljam3.clean_text(hit.author_name) or "—",
+                    hit.page_number if hit.page_number is not None else "",
                 ),
             )
-        self._set_status(
-            f"إجمالي النتائج: {pagination.get('count', '؟')} — المعروض: {len(hits)}"
-        )
+        total = pagination.get("count", pagination.get("total", "؟"))
+        self._set_status(f"إجمالي النتائج: {total} — المعروض: {len(hits)}")
 
     # ----------------------------------------------------------------- التحديد
     def _toggle(self, event=None) -> str:
@@ -259,7 +261,7 @@ class TakhrijApp(tk.Tk):
             return
         hit = self.hits[int(item)]
         self.preview.delete("1.0", "end")
-        self.preview.insert("1.0", aljam3.clean_text(hit.content), "rtl")
+        self.preview.insert("1.0", aljam3.clean_text(hit.excerpt), "rtl")
         self._current_hit = hit
         self._refresh_cit()
 
@@ -322,7 +324,16 @@ class TakhrijApp(tk.Tk):
         doc.add_paragraph("")
 
         for idx, hit in enumerate(self.checked.values(), 1):
-            text = aljam3.clean_text(hit.content)
+            # نحاول جلب نص الصفحة كاملًا؛ وإلا نكتفي بالمقتطف
+            text = ""
+            if hit.file_id is not None and hit.page_number is not None:
+                try:
+                    page = aljam3.get_page(hit.file_id, hit.page_number)
+                    text = aljam3.clean_text(page.get("text", ""))
+                except Exception:  # noqa: BLE001
+                    text = ""
+            if not text:
+                text = aljam3.clean_text(hit.excerpt)
             cit = aljam3.format_citation(hit, with_author=self.with_author_var.get())
 
             # النص
@@ -341,7 +352,7 @@ class TakhrijApp(tk.Tk):
             r.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
 
             # الرابط
-            if self.with_link_var.get() and hit.book:
+            if self.with_link_var.get() and hit.site_url:
                 link_p = doc.add_paragraph()
                 set_rtl(link_p)
                 lr = link_p.add_run(hit.site_url)
