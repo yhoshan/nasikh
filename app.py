@@ -131,9 +131,6 @@ class TakhrijApp(tk.Tk):
         bar.pack(fill="x", padx=6, pady=8)
 
         # الزر البطل
-        self.with_author_var = tk.BooleanVar(value=True)
-        self.with_link_var = tk.BooleanVar(value=True)
-
         export_btn = ttk.Button(
             bar, text="📄  نسخ المحدَّد إلى Word", command=self.export_word
         )
@@ -142,12 +139,8 @@ class TakhrijApp(tk.Tk):
         ttk.Button(bar, text="تحديد الكل", command=self._select_all).pack(side="left", padx=4)
         ttk.Button(bar, text="إلغاء التحديد", command=self._clear_all).pack(side="left", padx=4)
 
-        ttk.Checkbutton(bar, text="رابط المصدر في Word", variable=self.with_link_var).pack(
-            side="right", padx=6
-        )
-        ttk.Checkbutton(
-            bar, text="إدراج المؤلف في التخريج", variable=self.with_author_var,
-            command=self._refresh_cit,
+        ttk.Label(
+            bar, text="صيغة المرجع:  <اسم الكتاب  الجزء/الصفحة>", foreground="#777"
         ).pack(side="right", padx=6)
 
     def _build_statusbar(self) -> None:
@@ -269,8 +262,8 @@ class TakhrijApp(tk.Tk):
         hit = getattr(self, "_current_hit", None)
         if not hit:
             return
-        cit = aljam3.format_citation(hit, with_author=self.with_author_var.get())
-        self.cit_var.set(f"التخريج:  ({cit})")
+        cit = aljam3.format_citation(hit)
+        self.cit_var.set(f"المرجع:  {cit}")
 
     # ----------------------------------------------------------------- النقل إلى Word
     def export_word(self) -> None:
@@ -304,7 +297,7 @@ class TakhrijApp(tk.Tk):
 
     def _word_worker(self, path: str) -> None:
         from docx import Document
-        from docx.shared import Pt, RGBColor
+        from docx.shared import Pt
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
 
@@ -324,40 +317,31 @@ class TakhrijApp(tk.Tk):
         doc.add_paragraph("")
 
         for idx, hit in enumerate(self.checked.values(), 1):
-            # نحاول جلب نص الصفحة كاملًا؛ وإلا نكتفي بالمقتطف
+            # نحاول جلب نص الصفحة كاملًا نظيفًا؛ وإلا نكتفي بالمقتطف
             text = ""
             if hit.file_id is not None and hit.page_number is not None:
                 try:
-                    page = aljam3.get_page(hit.file_id, hit.page_number)
-                    text = aljam3.clean_text(page.get("text", ""))
+                    text = aljam3.get_page_text(hit.file_id, hit.page_number)
                 except Exception:  # noqa: BLE001
                     text = ""
             if not text:
                 text = aljam3.clean_text(hit.excerpt)
-            cit = aljam3.format_citation(hit, with_author=self.with_author_var.get())
 
-            # النص
-            body = doc.add_paragraph()
-            body.alignment = 3  # justify
-            set_rtl(body)
-            body.add_run(f"{idx}) ").bold = True
-            body.add_run(text)
+            # المرجع بالصيغة:  <اسم الكتاب الجزء/الصفحة>
+            cit = aljam3.format_citation(hit)
 
-            # التخريج
+            # النص (كل سطر فقرة لحفظ الأسطر)
+            for line in text.split("\n"):
+                body = doc.add_paragraph()
+                body.alignment = 3  # justify
+                set_rtl(body)
+                body.add_run(line)
+
+            # المرجع في سطر مستقل، غامق
             ref = doc.add_paragraph()
             set_rtl(ref)
-            r = ref.add_run(f"المصدر: ({cit})")
-            r.italic = True
-            r.font.size = Pt(10)
-            r.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
-
-            # الرابط
-            if self.with_link_var.get() and hit.site_url:
-                link_p = doc.add_paragraph()
-                set_rtl(link_p)
-                lr = link_p.add_run(hit.site_url)
-                lr.font.size = Pt(9)
-                lr.font.color.rgb = RGBColor(0x1A, 0x5F, 0xB4)
+            r = ref.add_run(cit)
+            r.bold = True
 
             doc.add_paragraph("")
 

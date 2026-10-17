@@ -63,6 +63,7 @@ class SearchHit:
     category_name: str = ""
     library_name: str = ""
     page_number: Optional[int] = None
+    vol: str = ""               # رقم الجزء/المجلد (إن وُجد)
     file_id: Optional[int] = None
     book_id: Optional[int] = None
     url: str = ""               # رابط صفحة الجامع
@@ -218,6 +219,7 @@ def search(
                 category_name=_name_of(_first(r, "category", "category_name", "subject")),
                 library_name=_name_of(_first(r, "library", "library_name")),
                 page_number=page_number,
+                vol=str(_first(r, "vol", "volume", "part", default="")),
                 file_id=file_id,
                 book_id=book_id,
                 url=url,
@@ -258,11 +260,28 @@ def enrich_authors(hits: list["SearchHit"]) -> None:
 
 
 def get_page(file_id: int, page_number: int, max_chars: int = 12000) -> dict[str, Any]:
-    """يقرأ نص صفحة بعينها كاملًا عبر أداة MCP «get_page»."""
+    """يقرأ نص صفحة بعينها كاملًا عبر أداة MCP «get_page» (يُرجع الكائن الخام)."""
     return _mcp_call(
         "get_page",
         {"file_id": file_id, "page_number": page_number, "max_chars": max_chars},
     )
+
+
+def get_page_text(file_id: int, page_number: int, max_chars: int = 12000) -> str:
+    """
+    يقرأ نص صفحة بعينها ويُعيد النص النظيف فقط (نصًّا عاديًا بلا وسوم ولا JSON).
+    يستخرج حقل النص من رد get_page أيًّا كان اسمه (text/content).
+    """
+    data = get_page(file_id, page_number, max_chars=max_chars)
+    raw = ""
+    if isinstance(data, dict):
+        # النص قد يكون في text أو content، وقد يكون داخل كائن page
+        raw = _first(data, "text", "content", default="")
+        if not raw and isinstance(data.get("page"), dict):
+            raw = _first(data["page"], "text", "content", default="")
+    else:
+        raw = str(data)
+    return clean_text(raw)
 
 
 def list_categories(query: str = "", per_page: int = 20) -> list[dict[str, Any]]:
@@ -285,33 +304,56 @@ def list_libraries(per_page: int = 20) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t]+")
+# مُعلِّمات أرقام الصفحات الخاصة بالجامع مثل: ⦗...⦘  أو  (رقم)  في بداية السطر
+_PAGE_MARKER_RE = re.compile(r"⦗[^⦘]*⦘")
 
 
 def clean_text(raw: str) -> str:
-    """يزيل الوسوم (بما فيها <mark>) ويفكّ الكيانات ويضبط الفراغات."""
+    """
+    ينظّف نص الجامع تنظيفًا كاملًا:
+      - يزيل وسوم HTML (بما فيها <mark>)
+      - يفكّ كيانات HTML (&amp; ...)
+      - يحوّل \\r\\n الحرفية (المكتوبة كنص) إلى أسطر فعلية
+      - يزيل معلِّمات أرقام الصفحات ⦗...⦘
+      - يضبط الفراغات والأسطر
+    """
     if not raw:
         return ""
-    txt = _TAG_RE.sub("", str(raw))
+    txt = str(raw)
+    # حوّل تسلسلات \r\n و \n و \t المكتوبة حرفيًا (نصًّا) إلى ما يقابلها
+    txt = txt.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    txt = txt.replace("\\t", " ")
+    txt = _TAG_RE.sub("", txt)
     txt = html_lib.unescape(txt)
-    txt = _WS_RE.sub(" ", txt)
-    return txt.strip()
+    txt = _PAGE_MARKER_RE.sub("", txt)
+    # اضبط الفراغات داخل كل سطر، وقلّل الأسطر الفارغة المتتالية
+    lines = [_WS_RE.sub(" ", ln).strip() for ln in txt.split("\n")]
+    out: list[str] = []
+    for ln in lines:
+        if ln or (out and out[-1]):   # لا تكرّر الأسطر الفارغة
+            out.append(ln)
+    return "\n".join(out).strip()
 
 
 def format_citation(hit: SearchHit, *, with_author: bool = True) -> str:
     """
-    يبني نص التخريج:
-        اسم الكتاب، لـفلان، ص رقم
+    يبني المرجع بالصيغة المطلوبة:
+        <اسم الكتاب الجزء/الصفحة>
+    وإن لم يوجد جزء يُكتفى برقم الصفحة:
+        <اسم الكتاب الصفحة>
+
+    (المعامل with_author مُبقًى للتوافق لكنه غير مستخدم في هذه الصيغة.)
     """
     name = clean_text(hit.book_name) or "كتاب غير معروف"
-    parts: list[str] = []
-    author = clean_text(hit.author_name)
-    if with_author and author:
-        parts.append(f"{name}، لـ{author}")
+    vol = str(hit.vol).strip() if hit.vol else ""
+    page = hit.page_number
+
+    if vol and vol not in ("0", "None"):
+        loc = f"{vol}/{page}" if page is not None else vol
     else:
-        parts.append(name)
-    if hit.page_number is not None:
-        parts.append(f"ص {hit.page_number}")
-    return "، ".join(parts)
+        loc = str(page) if page is not None else ""
+
+    return f"<{name} {loc}>".replace("  ", " ").strip() if loc else f"<{name}>"
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +368,8 @@ def _demo(query: str, limit: int = 5) -> None:
         return
     print(f"إجمالي النتائج: {pagination.get('count', pagination.get('total', '?'))}\n")
     for i, hit in enumerate(hits, 1):
-        print(f"[{i}] {format_citation(hit)}")
+        print(f"[{i}] المرجع: {format_citation(hit)}")
         print(f"    {clean_text(hit.excerpt)[:150]}…")
-        print(f"    المصدر: {hit.site_url}")
         print("-" * 60)
 
 
