@@ -27,9 +27,13 @@ import itertools
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Optional
 
 import requests
+
+# قاعدة REST (نستعملها لجلب اسم المؤلف من بيانات الكتاب عند غيابه في نتيجة البحث)
+REST_BASE = "https://aljam3.com/api/v1"
 
 MCP_URL = "https://aljam3.com/mcp"
 SITE_BASE = "https://aljam3.com"
@@ -167,10 +171,13 @@ def search(
     library_id: Optional[int] = None,
     per_page: int = 20,
     page: int = 1,
+    enrich_author: bool = True,
 ) -> tuple[dict[str, Any], list[SearchHit]]:
     """
     يبحث في نصوص كتب الجامع عبر أداة MCP «search».
     يُرجع (معلومات الترقيم, قائمة النتائج) — كل نتيجة تحوي بيانات كتابها كاملة.
+
+    enrich_author=True: يملأ اسم المؤلف الناقص من بيانات الكتاب (طلبات مُخزّنة مؤقتًا).
     """
     args: dict[str, Any] = {"q": query, "per_page": per_page, "page": page}
     if book_id is not None:
@@ -217,7 +224,37 @@ def search(
                 pdf_url=_first(r, "pdf_url", "pdf_link", "pdf"),
             )
         )
+
+    if enrich_author:
+        enrich_authors(hits)
+
     return pagination, hits
+
+
+@lru_cache(maxsize=1024)
+def author_of_book(book_id: int) -> str:
+    """
+    يجلب اسم مؤلف كتاب من واجهة REST (/books/{id}) عند غيابه في نتيجة البحث.
+    مُخزَّن مؤقتًا لتفادي الطلبات المكررة لنفس الكتاب.
+    """
+    try:
+        resp = requests.get(
+            f"{REST_BASE}/books/{book_id}",
+            headers={"Accept": "application/json", "User-Agent": _HEADERS["User-Agent"]},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return _name_of(data.get("author"))
+    except requests.RequestException:
+        return ""
+
+
+def enrich_authors(hits: list["SearchHit"]) -> None:
+    """يملأ أسماء المؤلفين الناقصة في النتائج (في مكانها)."""
+    for hit in hits:
+        if not clean_text(hit.author_name) and hit.book_id:
+            hit.author_name = author_of_book(int(hit.book_id))
 
 
 def get_page(file_id: int, page_number: int, max_chars: int = 12000) -> dict[str, Any]:
@@ -295,7 +332,23 @@ def _demo(query: str, limit: int = 5) -> None:
         print("-" * 60)
 
 
+def _diagnose(query: str) -> None:
+    """يطبع المفاتيح الخام لأول نتيجة (للتشخيص عند الحاجة)."""
+    args = {"q": query, "per_page": 1, "page": 1}
+    data = _mcp_call("search", args)
+    rows = data.get("results") or data.get("pages") or data.get("books") or []
+    print("مفاتيح الترقيم:", list((data.get("pagination") or {}).keys()))
+    if rows:
+        print("أول نتيجة (خام):")
+        print(json.dumps(rows[0], ensure_ascii=False, indent=2))
+    else:
+        print("لا نتائج. المفاتيح العليا:", list(data.keys()))
+
+
 if __name__ == "__main__":
     import sys
-    q = sys.argv[1] if len(sys.argv) > 1 else "إنما الأعمال بالنيات"
-    _demo(q)
+    if len(sys.argv) > 1 and sys.argv[1] == "--diagnose":
+        _diagnose(sys.argv[2] if len(sys.argv) > 2 else "إنما الأعمال بالنيات")
+    else:
+        q = sys.argv[1] if len(sys.argv) > 1 else "إنما الأعمال بالنيات"
+        _demo(q)
