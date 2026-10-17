@@ -136,6 +136,28 @@ def _first(d: dict, *keys, default=""):
     return default
 
 
+def _name_of(value: Any) -> str:
+    """
+    يستخرج الاسم سواء كانت القيمة نصًّا مباشرًا أو كائنًا فيه {'name': ...}.
+    (الجامع يُرجع author/category/library ككائنات فيها name و id.)
+    """
+    if isinstance(value, dict):
+        return str(value.get("name", "") or value.get("title", "") or "")
+    if value in (None, ""):
+        return ""
+    return str(value)
+
+
+def _id_of(value: Any) -> Optional[int]:
+    """يستخرج المعرّف من كائن {'id': ...} أو من رقم مباشر."""
+    if isinstance(value, dict):
+        v = value.get("id")
+        return int(v) if isinstance(v, int) else None
+    if isinstance(value, int):
+        return value
+    return None
+
+
 def search(
     query: str,
     *,
@@ -164,18 +186,34 @@ def search(
     pagination = data.get("pagination", {}) or {}
     hits: list[SearchHit] = []
 
-    for r in data.get("results", []) or []:
+    # قائمة النتائج قد تأتي تحت أحد هذه المفاتيح
+    rows = data.get("results") or data.get("pages") or data.get("books") or []
+    for r in rows:
+        book_id = _id_of(r.get("book")) or _first(r, "book_id", "id", default=None)
+        url = _first(r, "url", "aljam3_url", "link")
+        file_id = _first(r, "file_id", default=None)
+        page_number = _first(r, "page_number", "number", "page", default=None)
+
+        # احتياط: استخرج file_id ورقم الصفحة من الرابط إن لزم
+        # نمط الرابط: https://aljam3.com/ar/{book}/{file}/{page}
+        if (file_id is None or page_number is None) and url:
+            m = re.search(r"/(\d+)/(\d+)/(\d+)/?$", url)
+            if m:
+                book_id = book_id or int(m.group(1))
+                file_id = file_id if file_id is not None else int(m.group(2))
+                page_number = page_number if page_number is not None else int(m.group(3))
+
         hits.append(
             SearchHit(
                 excerpt=_first(r, "excerpt", "snip", "text", "content"),
-                book_name=_first(r, "book_name", "book", "book_title"),
-                author_name=_first(r, "author_name", "author"),
-                category_name=_first(r, "category_name", "subject", "category"),
-                library_name=_first(r, "library_name", "library"),
-                page_number=_first(r, "page_number", "number", "page", default=None),
-                file_id=_first(r, "file_id", default=None),
-                book_id=_first(r, "book_id", default=None),
-                url=_first(r, "url", "aljam3_url", "link"),
+                book_name=_name_of(_first(r, "book", "book_name", "title", "book_title")),
+                author_name=_name_of(_first(r, "author", "author_name")),
+                category_name=_name_of(_first(r, "category", "category_name", "subject")),
+                library_name=_name_of(_first(r, "library", "library_name")),
+                page_number=page_number,
+                file_id=file_id,
+                book_id=book_id,
+                url=url,
                 pdf_url=_first(r, "pdf_url", "pdf_link", "pdf"),
             )
         )
