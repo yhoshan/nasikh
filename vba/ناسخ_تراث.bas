@@ -119,15 +119,16 @@ Private Sub InsertResults(ByVal json As String, ByVal query As String)
         bodyText = CleanText(GetJsonValue(chunk, "snip"))
         If bodyText = "" Then bodyText = CleanText(GetJsonValue(chunk, "text"))
 
-        ' meta is a JSON *string*: unescape then read fields
-        Dim metaRaw As String, meta As String
-        metaRaw = GetJsonValue(chunk, "meta")      ' already unescaped by reader
-        meta = metaRaw
+        ' meta is a JSON string (JSON inside JSON). GetJsonValue already
+        ' unescaped one level (\" -> "), so now read fields directly.
+        ' As a safety net we also handle a remaining escaped level.
+        Dim meta As String
+        meta = GetJsonValue(chunk, "meta")
 
         Dim bookName As String, pageNum As String, vol As String
-        bookName = CleanText(GetJsonValue(meta, "book_name"))
-        pageNum = GetJsonValue(meta, "page")
-        vol = GetJsonValue(meta, "vol")
+        bookName = CleanText(GetMetaValue(meta, "book_name"))
+        pageNum = GetMetaValue(meta, "page")
+        vol = GetMetaValue(meta, "vol")
 
         If bookName <> "" Or bodyText <> "" Then
             n = n + 1
@@ -277,6 +278,61 @@ Private Function GetJsonValue(ByVal json As String, ByVal key As String) As Stri
             m = m + 1
         Loop
         GetJsonValue = Trim$(num)
+    End If
+End Function
+
+
+' يقرأ قيمة من نص meta سواء كانت علامات الاقتباس عادية (") أو مهرّبة (\").
+' يتعامل مع:   "key":"value"   و   \"key\":\"value\"   و   \"key\":value
+Private Function GetMetaValue(ByVal meta As String, ByVal key As String) As String
+    ' أولًا: جرّب القراءة العادية (علامات اقتباس غير مهرّبة)
+    Dim v As String
+    v = GetJsonValue(meta, key)
+    If v <> "" Then
+        GetMetaValue = v
+        Exit Function
+    End If
+
+    ' ثانيًا: ابحث عن المفتاح المهرّب  \"key\"
+    Dim pat As String
+    pat = "\""" & key & "\"""      ' = \"key\"
+    Dim i As Long
+    i = InStr(meta, pat)
+    If i = 0 Then Exit Function
+
+    i = InStr(i + Len(pat), meta, ":")
+    If i = 0 Then Exit Function
+    i = i + 1
+    Do While i <= Len(meta) And Mid$(meta, i, 1) = " "
+        i = i + 1
+    Loop
+    If i > Len(meta) Then Exit Function
+
+    ' القيمة قد تبدأ بـ  \"  (نص)  أو برقم
+    If Mid$(meta, i, 2) = "\""" Then
+        ' نص مهرّب: اقرأ حتى  \"  التالية
+        Dim j As Long
+        j = i + 2
+        Dim out As String
+        Do While j <= Len(meta)
+            If Mid$(meta, j, 2) = "\""" Then Exit Do
+            out = out & Mid$(meta, j, 1)
+            j = j + 1
+        Loop
+        GetMetaValue = out
+    Else
+        ' رقم أو قيمة بسيطة: اقرأ حتى , أو } أو \
+        Dim m As Long
+        m = i
+        Dim num As String
+        Do While m <= Len(meta)
+            Dim d As String
+            d = Mid$(meta, m, 1)
+            If d = "," Or d = "}" Or d = "\" Or d = "]" Then Exit Do
+            num = num & d
+            m = m + 1
+        Loop
+        GetMetaValue = Trim$(num)
     End If
 End Function
 
