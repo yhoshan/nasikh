@@ -337,10 +337,12 @@ class TakhrijApp(tk.Tk):
                 set_rtl(body)
                 body.add_run(line)
 
-            # المرجع في سطر مستقل، غامق
+            # المرجع في سطر مستقل، غامق، محاذى لليمين
             ref = doc.add_paragraph()
             set_rtl(ref)
-            r = ref.add_run(cit)
+            ref.alignment = 2  # محاذاة يمين (WD_ALIGN_PARAGRAPH.RIGHT)
+            # علامة RLM في البداية تضمن أن القوس الزاوي < > يُعرض من اليمين
+            r = ref.add_run("\u200f" + cit)
             r.bold = True
 
             doc.add_paragraph("")

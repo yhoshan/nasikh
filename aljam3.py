@@ -267,20 +267,50 @@ def get_page(file_id: int, page_number: int, max_chars: int = 12000) -> dict[str
     )
 
 
+def _extract_text_field(data: Any) -> str:
+    """
+    يستخرج نص الصفحة من رد get_page مهما كان شكله:
+      - dict فيه text/content (ربما داخل page)
+      - قيمة text قد تكون هي نفسها dict/string فيه الحقل
+      - string عادي
+    """
+    # فُكّ التغليف المتكرر حتى نصل إلى نص فعلي
+    for _ in range(4):
+        if isinstance(data, dict):
+            # جرّب المفاتيح المعروفة بالترتيب
+            for key in ("text", "content"):
+                if key in data and data[key] not in (None, ""):
+                    data = data[key]
+                    break
+            else:
+                # لا مفتاح نصّي مباشر؛ جرّب page ثم أي قيمة نصية طويلة
+                if isinstance(data.get("page"), (dict, str)):
+                    data = data["page"]
+                    continue
+                strings = [v for v in data.values() if isinstance(v, str) and len(v) > 20]
+                data = max(strings, key=len) if strings else ""
+                break
+        else:
+            break
+    return data if isinstance(data, str) else str(data)
+
+
+# بقايا تمثيل كائن بايثون/JSON قد تتسرّب إلى النص
+_JSON_LEFTOVER_RE = re.compile(
+    r"\{?\s*['\"]?(content|text)['\"]?\s*:\s*['\"]?"      # {'content': '
+    r"|['\"]?,?\s*['\"]?(offset|total_chars|next_offset|page|number|vol)['\"]?\s*:\s*[^,}]*"
+    r"|[{}]"
+)
+
+
 def get_page_text(file_id: int, page_number: int, max_chars: int = 12000) -> str:
     """
     يقرأ نص صفحة بعينها ويُعيد النص النظيف فقط (نصًّا عاديًا بلا وسوم ولا JSON).
-    يستخرج حقل النص من رد get_page أيًّا كان اسمه (text/content).
     """
     data = get_page(file_id, page_number, max_chars=max_chars)
-    raw = ""
-    if isinstance(data, dict):
-        # النص قد يكون في text أو content، وقد يكون داخل كائن page
-        raw = _first(data, "text", "content", default="")
-        if not raw and isinstance(data.get("page"), dict):
-            raw = _first(data["page"], "text", "content", default="")
-    else:
-        raw = str(data)
+    raw = _extract_text_field(data)
+    # أزل أي بقايا تمثيل كائن تسرّبت ضمن النص
+    raw = _JSON_LEFTOVER_RE.sub(" ", raw)
     return clean_text(raw)
 
 
@@ -348,7 +378,11 @@ def format_citation(hit: SearchHit, *, with_author: bool = True) -> str:
     vol = str(hit.vol).strip() if hit.vol else ""
     page = hit.page_number
 
-    if vol and vol not in ("0", "None"):
+    # لا نقبل الجزء إلا إذا كان رقمًا نظيفًا (نتجاهل أسماء الملفات مثل "06-01")
+    if not re.fullmatch(r"[0-9٠-٩]+", vol) or vol in ("0", "٠"):
+        vol = ""
+
+    if vol:
         loc = f"{vol}/{page}" if page is not None else vol
     else:
         loc = str(page) if page is not None else ""
