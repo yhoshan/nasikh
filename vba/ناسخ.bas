@@ -1,12 +1,15 @@
 Attribute VB_Name = "Nasikh"
 '============================================================
-'  ناسخ — ماكرو Word للبحث في مكتبة الجامع وإدراج النص
-'          مع المرجع  <اسم الكتاب الجزء/الصفحة>  داخل المستند.
+'  Nasikh - Word macro to search Aljam3 library and insert
+'  the text with reference  <book-name part/page>.
 '
-'  يتصل بخادم الجامع العام (MCP) عبر HTTPS، بلا مفتاح.
-'  يحتاج اتصالًا بالإنترنت.
+'  Connects to Aljam3 public MCP server over HTTPS (no key).
+'  Needs an internet connection.
 '
-'  الاستخدام: شغّل الماكرو  NasikhSearch  (أو من الزر في الشريط).
+'  Run macro:  NasikhSearch   (or from the ribbon button).
+'
+'  NOTE: All Arabic UI texts are built via ChrW() helper
+'  functions so they are NOT affected by file encoding.
 '============================================================
 Option Explicit
 
@@ -14,21 +17,20 @@ Private Const MCP_URL As String = "https://aljam3.com/mcp"
 
 
 '------------------------------------------------------------
-' نقطة الدخول: يسأل عن العبارة، يبحث، ويُدرج النتائج.
+' Entry point: ask for query, search, insert results.
 '------------------------------------------------------------
 Public Sub NasikhSearch()
     Dim query As String
-    query = InputBox("اكتب عبارة البحث في مكتبة الجامع:", "ناسخ — بحث")
+    query = InputBox(T_PROMPT(), T_TITLE())
     If Trim(query) = "" Then Exit Sub
 
-    Dim countStr As String
     Dim response As String
     On Error GoTo HttpError
     response = McpSearch(query, 10)
     On Error GoTo 0
 
     If Len(response) = 0 Then
-        MsgBox "لم تصل نتائج. تأكد من الاتصال بالإنترنت.", vbExclamation, "ناسخ"
+        MsgBox T_NO_RESULTS_NET(), vbExclamation, T_NAME()
         Exit Sub
     End If
 
@@ -36,12 +38,12 @@ Public Sub NasikhSearch()
     Exit Sub
 
 HttpError:
-    MsgBox "تعذّر الاتصال بالجامع:" & vbCrLf & Err.Description, vbCritical, "ناسخ"
+    MsgBox T_CONN_FAIL() & vbCrLf & Err.Description, vbCritical, T_NAME()
 End Sub
 
 
 '------------------------------------------------------------
-' يُرسل طلب MCP (JSON-RPC) إلى أداة search ويعيد نص الرد.
+' Send MCP (JSON-RPC) request to the search tool.
 '------------------------------------------------------------
 Private Function McpSearch(ByVal query As String, ByVal perPage As Long) As String
     Dim http As Object
@@ -66,11 +68,10 @@ End Function
 
 
 '------------------------------------------------------------
-' يحلّل رد الجامع ويُدرج كل نتيجة (المقتطف + المرجع) في المستند.
-' ملاحظة: محلّل مبسّط يستخرج الحقول المطلوبة فقط (book title/number/excerpt).
+' Parse the response and insert each result (text + reference).
 '------------------------------------------------------------
 Private Sub InsertResultsFromJson(ByVal json As String, ByVal query As String)
-    ' لو كان الرد تدفّق أحداث (SSE) فخذ ما بعد أول "data:"
+    ' If SSE stream, take what follows the first "data:"
     Dim p As Long
     p = InStr(json, "data:")
     If p > 0 Then json = Mid$(json, p + 5)
@@ -78,12 +79,11 @@ Private Sub InsertResultsFromJson(ByVal json As String, ByVal query As String)
     Dim sel As Object
     Set sel = Selection
 
-    ' عنوان
-    sel.TypeText "نتائج البحث عن: «" & query & "»"
+    ' Title
+    sel.TypeText T_RESULTS_FOR() & query & T_QUOTE_CLOSE()
     sel.TypeParagraph
     sel.TypeParagraph
 
-    ' مرّ على النتائج: نقسّم عند كل "excerpt" (أو snip) كبداية عنصر
     Dim items() As String
     items = SplitResults(json)
 
@@ -106,10 +106,8 @@ Private Sub InsertResultsFromJson(ByVal json As String, ByVal query As String)
 
         If bookName <> "" Or excerpt <> "" Then
             n = n + 1
-            ' النص
             sel.TypeText excerpt
             sel.TypeParagraph
-            ' المرجع  <اسم الكتاب الجزء/الصفحة>  محاذى لليمين
             Dim ref As String
             ref = BuildReference(bookName, vol, pageNum)
             InsertReferenceRight sel, ref
@@ -119,18 +117,18 @@ Private Sub InsertResultsFromJson(ByVal json As String, ByVal query As String)
     Next i
 
     If n = 0 Then
-        sel.TypeText "لا توجد نتائج مطابقة."
+        sel.TypeText T_NO_MATCH()
         sel.TypeParagraph
     End If
 End Sub
 
 
 '------------------------------------------------------------
-' يبني نص المرجع:  <اسم الكتاب الجزء/الصفحة>
-' يتجاهل الجزء إن لم يكن رقمًا نظيفًا، ويكتفي بالصفحة.
+' Build reference:  <book part/page>
+' Ignores part unless it is a clean number; else page only.
 '------------------------------------------------------------
 Private Function BuildReference(ByVal name As String, ByVal vol As String, ByVal page As String) As String
-    If name = "" Then name = "كتاب غير معروف"
+    If name = "" Then name = T_UNKNOWN_BOOK()
     Dim loc As String
 
     If IsNumericClean(vol) And vol <> "0" Then
@@ -152,22 +150,21 @@ End Function
 
 
 '------------------------------------------------------------
-' يُدرج المرجع في سطر محاذى لليمين (مع علامة RLM).
+' Insert reference right-aligned (with RLM mark).
 '------------------------------------------------------------
 Private Sub InsertReferenceRight(ByVal sel As Object, ByVal ref As String)
     sel.ParagraphFormat.Alignment = wdAlignParagraphRight
     sel.Font.Bold = True
-    sel.TypeText ChrW(&H200F) & ref   ' RLM لضمان اتجاه القوس < >
+    sel.TypeText ChrW(&H200F) & ref
     sel.Font.Bold = False
     sel.ParagraphFormat.Alignment = wdAlignParagraphRight
 End Sub
 
 
 '============================================================
-'  أدوات مساعدة (محلّل JSON مبسّط + تنظيف نص)
+'  Helpers (simple JSON reader + text cleaner)
 '============================================================
 
-' يقسّم الرد إلى عناصر عند كل بداية نتيجة (نبحث عن "excerpt" أو "snip").
 Private Function SplitResults(ByVal json As String) As String()
     Dim marker As String
     marker = """excerpt"""
@@ -177,10 +174,9 @@ Private Function SplitResults(ByVal json As String) As String()
     Dim parts() As String
     parts = Split(json, marker)
 
-    ' أعِد لصق الواسم في بداية كل جزء (ما عدا الأول قبل أول نتيجة)
     Dim res() As String
     Dim cnt As Long
-    cnt = UBound(parts) - LBound(parts)   ' عدد النتائج تقريبًا
+    cnt = UBound(parts) - LBound(parts)
     If cnt < 1 Then
         ReDim res(0 To 0)
         res(0) = json
@@ -197,7 +193,6 @@ Private Function SplitResults(ByVal json As String) As String()
 End Function
 
 
-' يستخرج قيمة مفتاح بسيط ("key":"value" أو "key":value) من مقطع JSON.
 Private Function GetJsonValue(ByVal json As String, ByVal key As String) As String
     Dim pat As String
     pat = """" & key & """"
@@ -209,17 +204,14 @@ Private Function GetJsonValue(ByVal json As String, ByVal key As String) As Stri
     If i = 0 Then Exit Function
     i = i + 1
 
-    ' تخطّ الفراغات
     Do While i <= Len(json) And Mid$(json, i, 1) = " "
         i = i + 1
     Loop
-
     If i > Len(json) Then Exit Function
 
     Dim ch As String
     ch = Mid$(json, i, 1)
     If ch = """" Then
-        ' قيمة نصية: اقرأ حتى علامة الاقتباس التالية غير المهرّبة
         Dim j As Long
         j = i + 1
         Dim out As String
@@ -227,7 +219,6 @@ Private Function GetJsonValue(ByVal json As String, ByVal key As String) As Stri
             Dim c As String
             c = Mid$(json, j, 1)
             If c = "\" Then
-                ' حرف مهرّب
                 Dim nx As String
                 nx = Mid$(json, j + 1, 1)
                 Select Case nx
@@ -238,9 +229,9 @@ Private Function GetJsonValue(ByVal json As String, ByVal key As String) As Stri
                     Case "\": out = out & "\"
                     Case "/": out = out & "/"
                     Case "u"
-                        Dim hex As String
-                        hex = Mid$(json, j + 2, 4)
-                        out = out & ChrW(CLng("&H" & hex))
+                        Dim hx As String
+                        hx = Mid$(json, j + 2, 4)
+                        out = out & ChrW(CLng("&H" & hx))
                         j = j + 4
                     Case Else: out = out & nx
                 End Select
@@ -254,7 +245,6 @@ Private Function GetJsonValue(ByVal json As String, ByVal key As String) As Stri
         Loop
         GetJsonValue = out
     Else
-        ' قيمة رقمية/منطقية: اقرأ حتى , أو } أو ]
         Dim m As Long
         m = i
         Dim num As String
@@ -270,12 +260,10 @@ Private Function GetJsonValue(ByVal json As String, ByVal key As String) As Stri
 End Function
 
 
-' يستخرج اسم الكتاب: قد يكون "book":{"name":"..."} أو "book_name":"..." أو "title":"..."
 Private Function GetBookName(ByVal json As String) As String
     Dim i As Long
     i = InStr(json, """book""")
     If i > 0 Then
-        ' خذ المقطع بعد "book": واستخرج name منه
         Dim sub1 As String
         sub1 = Mid$(json, i)
         GetBookName = GetJsonValue(sub1, "name")
@@ -289,10 +277,8 @@ Private Function GetBookName(ByVal json As String) As String
 End Function
 
 
-' تنظيف النص: إزالة وسوم HTML وبقايا شائعة.
 Private Function CleanText(ByVal s As String) As String
     If s = "" Then Exit Function
-    ' أزل الوسوم <...>
     Dim out As String, inTag As Boolean, k As Long, c As String
     For k = 1 To Len(s)
         c = Mid$(s, k, 1)
@@ -304,12 +290,10 @@ Private Function CleanText(ByVal s As String) As String
             out = out & c
         End If
     Next k
-    ' فكّ كيانات شائعة
     out = Replace(out, "&amp;", "&")
     out = Replace(out, "&lt;", "<")
     out = Replace(out, "&gt;", ">")
     out = Replace(out, "&quot;", """")
-    ' قلّص الفراغات
     Do While InStr(out, "  ") > 0
         out = Replace(out, "  ", " ")
     Loop
@@ -317,7 +301,6 @@ Private Function CleanText(ByVal s As String) As String
 End Function
 
 
-' هل السلسلة أرقام فقط (عربية أو لاتينية)؟
 Private Function IsNumericClean(ByVal s As String) As Boolean
     s = Trim$(s)
     If s = "" Then Exit Function
@@ -332,7 +315,6 @@ Private Function IsNumericClean(ByVal s As String) As Boolean
 End Function
 
 
-' تهريب النص لإدراجه داخل JSON.
 Private Function JsonEscape(ByVal s As String) As String
     s = Replace(s, "\", "\\")
     s = Replace(s, """", "\""")
@@ -340,4 +322,54 @@ Private Function JsonEscape(ByVal s As String) As String
     s = Replace(s, vbCr, " ")
     s = Replace(s, vbLf, " ")
     JsonEscape = s
+End Function
+
+
+'============================================================
+'  Arabic UI texts built via ChrW (encoding-safe)
+'============================================================
+
+' اكتب عبارة البحث في مكتبة الجامع:
+Private Function T_PROMPT() As String
+    T_PROMPT = ChrW(1575) & ChrW(1603) & ChrW(1578) & ChrW(1576) & ChrW(32) & ChrW(1593) & ChrW(1576) & ChrW(1575) & ChrW(1585) & ChrW(1577) & ChrW(32) & ChrW(1575) & ChrW(1604) & ChrW(1576) & ChrW(1581) & ChrW(1579) & ChrW(32) & ChrW(1601) & ChrW(1610) & ChrW(32) & ChrW(1605) & ChrW(1603) & ChrW(1578) & ChrW(1576) & ChrW(1577) & ChrW(32) & ChrW(1575) & ChrW(1604) & ChrW(1580) & ChrW(1575) & ChrW(1605) & ChrW(1593) & ChrW(58)
+End Function
+
+' ناسخ — بحث
+Private Function T_TITLE() As String
+    T_TITLE = ChrW(1606) & ChrW(1575) & ChrW(1587) & ChrW(1582) & ChrW(32) & ChrW(8212) & ChrW(32) & ChrW(1576) & ChrW(1581) & ChrW(1579)
+End Function
+
+' ناسخ
+Private Function T_NAME() As String
+    T_NAME = ChrW(1606) & ChrW(1575) & ChrW(1587) & ChrW(1582)
+End Function
+
+' لم تصل نتائج. تأكد من الاتصال بالإنترنت.
+Private Function T_NO_RESULTS_NET() As String
+    T_NO_RESULTS_NET = ChrW(1604) & ChrW(1605) & ChrW(32) & ChrW(1578) & ChrW(1589) & ChrW(1604) & ChrW(32) & ChrW(1606) & ChrW(1578) & ChrW(1575) & ChrW(1574) & ChrW(1580) & ChrW(46) & ChrW(32) & ChrW(1578) & ChrW(1571) & ChrW(1603) & ChrW(1583) & ChrW(32) & ChrW(1605) & ChrW(1606) & ChrW(32) & ChrW(1575) & ChrW(1604) & ChrW(1575) & ChrW(1578) & ChrW(1589) & ChrW(1575) & ChrW(1604) & ChrW(32) & ChrW(1576) & ChrW(1575) & ChrW(1604) & ChrW(1573) & ChrW(1606) & ChrW(1578) & ChrW(1585) & ChrW(1606) & ChrW(1578) & ChrW(46)
+End Function
+
+' تعذّر الاتصال بالجامع:
+Private Function T_CONN_FAIL() As String
+    T_CONN_FAIL = ChrW(1578) & ChrW(1593) & ChrW(1584) & ChrW(1617) & ChrW(1585) & ChrW(32) & ChrW(1575) & ChrW(1604) & ChrW(1575) & ChrW(1578) & ChrW(1589) & ChrW(1575) & ChrW(1604) & ChrW(32) & ChrW(1576) & ChrW(1575) & ChrW(1604) & ChrW(1580) & ChrW(1575) & ChrW(1605) & ChrW(1593) & ChrW(58)
+End Function
+
+' نتائج البحث عن: «
+Private Function T_RESULTS_FOR() As String
+    T_RESULTS_FOR = ChrW(1606) & ChrW(1578) & ChrW(1575) & ChrW(1574) & ChrW(1580) & ChrW(32) & ChrW(1575) & ChrW(1604) & ChrW(1576) & ChrW(1581) & ChrW(1579) & ChrW(32) & ChrW(1593) & ChrW(1606) & ChrW(58) & ChrW(32) & ChrW(171)
+End Function
+
+' »
+Private Function T_QUOTE_CLOSE() As String
+    T_QUOTE_CLOSE = ChrW(187)
+End Function
+
+' لا توجد نتائج مطابقة.
+Private Function T_NO_MATCH() As String
+    T_NO_MATCH = ChrW(1604) & ChrW(1575) & ChrW(32) & ChrW(1578) & ChrW(1608) & ChrW(1580) & ChrW(1583) & ChrW(32) & ChrW(1606) & ChrW(1578) & ChrW(1575) & ChrW(1574) & ChrW(1580) & ChrW(32) & ChrW(1605) & ChrW(1591) & ChrW(1575) & ChrW(1576) & ChrW(1602) & ChrW(1577) & ChrW(46)
+End Function
+
+' كتاب غير معروف
+Private Function T_UNKNOWN_BOOK() As String
+    T_UNKNOWN_BOOK = ChrW(1603) & ChrW(1578) & ChrW(1575) & ChrW(1576) & ChrW(32) & ChrW(1594) & ChrW(1610) & ChrW(1585) & ChrW(32) & ChrW(1605) & ChrW(1593) & ChrW(1585) & ChrW(1608) & ChrW(1601)
 End Function
