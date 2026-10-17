@@ -17,6 +17,43 @@ Private Const MCP_URL As String = "https://aljam3.com/mcp"
 
 
 '------------------------------------------------------------
+' DIAGNOSTIC: writes the RAW first result into the document so
+' we can see the exact field names (book title / vol / page).
+' Run this once (Alt+F8 > NasikhDiagnose) and send the output.
+'------------------------------------------------------------
+Public Sub NasikhDiagnose()
+    Dim query As String
+    query = InputBox(T_PROMPT(), T_TITLE())
+    If Trim(query) = "" Then Exit Sub
+
+    Dim response As String
+    On Error GoTo HttpError
+    response = McpSearch(query, 1)
+    On Error GoTo 0
+
+    Dim p As Long
+    p = InStr(response, "data:")
+    If p > 0 Then response = Mid$(response, p + 5)
+
+    ' take a reasonable slice around the first result
+    Dim startAt As Long
+    startAt = InStr(response, """results""")
+    If startAt = 0 Then startAt = 1
+    Dim slice As String
+    slice = Mid$(response, startAt, 1500)
+
+    Selection.TypeText "=== RAW (first result) ==="
+    Selection.TypeParagraph
+    Selection.TypeText slice
+    Selection.TypeParagraph
+    Exit Sub
+
+HttpError:
+    MsgBox T_CONN_FAIL() & vbCrLf & Err.Description, vbCritical, T_NAME()
+End Sub
+
+
+'------------------------------------------------------------
 ' Entry point: ask for query, search, insert results.
 '------------------------------------------------------------
 Public Sub NasikhSearch()
@@ -103,6 +140,8 @@ Private Sub InsertResultsFromJson(ByVal json As String, ByVal query As String)
         If pageNum = "" Then pageNum = GetJsonValue(chunk, "number")
         If pageNum = "" Then pageNum = GetJsonValue(chunk, "page")
         vol = GetJsonValue(chunk, "vol")
+        If vol = "" Then vol = GetJsonValue(chunk, "volume")
+        If vol = "" Then vol = GetJsonValue(chunk, "part")
 
         If bookName <> "" Or excerpt <> "" Then
             n = n + 1
@@ -260,20 +299,64 @@ Private Function GetJsonValue(ByVal json As String, ByVal key As String) As Stri
 End Function
 
 
+' يستخرج عنوان الكتاب فقط (يتجنّب الخلط مع اسم المؤلف).
+' الأولوية: book_name > book.name/title (من كائن book) > title على المستوى الأعلى.
 Private Function GetBookName(ByVal json As String) As String
+    ' 1) حقل مباشر book_name
+    GetBookName = GetJsonValue(json, "book_name")
+    If GetBookName <> "" Then Exit Function
+
+    ' 2) داخل كائن "book": { ... "name"/"title" ... } مع قصّ الكائن عند أول }
     Dim i As Long
     i = InStr(json, """book""")
     If i > 0 Then
-        Dim sub1 As String
-        sub1 = Mid$(json, i)
-        GetBookName = GetJsonValue(sub1, "name")
-        If GetBookName <> "" Then Exit Function
-        GetBookName = GetJsonValue(sub1, "title")
-        If GetBookName <> "" Then Exit Function
+        Dim rest As String
+        rest = Mid$(json, i)
+        Dim obj As String
+        obj = ExtractObjectAfterKey(rest, "book")
+        If obj <> "" Then
+            GetBookName = GetJsonValue(obj, "name")
+            If GetBookName <> "" Then Exit Function
+            GetBookName = GetJsonValue(obj, "title")
+            If GetBookName <> "" Then Exit Function
+        End If
     End If
-    GetBookName = GetJsonValue(json, "book_name")
-    If GetBookName <> "" Then Exit Function
-    GetBookName = GetJsonValue(json, "title")
+
+    ' 3) حقل title على المستوى الأعلى (قبل ظهور author لتفادي اسم المؤلف)
+    Dim posTitle As Long, posAuthor As Long
+    posTitle = InStr(json, """title""")
+    posAuthor = InStr(json, """author""")
+    If posTitle > 0 And (posAuthor = 0 Or posTitle < posAuthor) Then
+        GetBookName = GetJsonValue(json, "title")
+    End If
+End Function
+
+
+' يستخرج محتوى كائن JSON يلي مفتاحًا معيّنًا: "key":{ ... }
+Private Function ExtractObjectAfterKey(ByVal json As String, ByVal key As String) As String
+    Dim pat As String
+    pat = """" & key & """"
+    Dim i As Long
+    i = InStr(json, pat)
+    If i = 0 Then Exit Function
+    i = InStr(i + Len(pat), json, "{")
+    If i = 0 Then Exit Function
+
+    Dim depth As Long, j As Long
+    depth = 0
+    For j = i To Len(json)
+        Dim c As String
+        c = Mid$(json, j, 1)
+        If c = "{" Then
+            depth = depth + 1
+        ElseIf c = "}" Then
+            depth = depth - 1
+            If depth = 0 Then
+                ExtractObjectAfterKey = Mid$(json, i, j - i + 1)
+                Exit Function
+            End If
+        End If
+    Next j
 End Function
 
 
